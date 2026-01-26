@@ -23,6 +23,7 @@
 - [About](#about)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Citation](#citation)
 - [Authors](#authors)
 
 ## About
@@ -127,6 +128,22 @@ The generic PDK data is hosted <a href="https://github.com/bmurmann/Book-on-gm-I
 `pygmid` also features a CLI which can be used to run techweeps to generate transistor data.
 
 *Documentation will be added in due course. This functionality is in a state of flux.*
+
+## Citation
+
+If you find this package useful in your research, please consider citing the following papers:
+
+1. **M. Srivastava\***, **C. O’Donnell\***, B. Griffin, P. Cantillon-Murphy, and D. O’Hare  
+   (*\*joint first authors*),  
+   *“Efficient Bio-Sensing Amplifier Design: A Python-Based gm/ID Design Methodology,”*  
+   **Proceedings of the IEEE Biomedical Circuits and Systems Conference (BioCAS)**, 2024.  
+   DOI: [10.1109/BioCAS61083.2024.10798363](https://doi.org/10.1109/BioCAS61083.2024.10798363)
+
+2. **T. Cortez**, **C. O’Donnell**, and **D. O’Hare**,  
+   *“Low Power ADC Buffer: A Python-Based gm/ID Design Methodology,”*  
+   **Proceedings of the 32nd IEEE International Conference on Electronics, Circuits and Systems (ICECS)**,  
+   Marrakech, Morocco, 2025, pp. 1–4.  
+   DOI: [10.1109/ICECS66544.2025.11270766](https://doi.org/10.1109/ICECS66544.2025.11270766)
 
 ## Authors
 

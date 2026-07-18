@@ -97,8 +97,8 @@ class Sweep:
                 params_p = p
                 values_p = pn_dict[params_p[0]]
                 for m, outvar in enumerate(self._config['outvars_noise']):
-                    nch[outvar][i,:,:,j] += np.squeeze(values_n)
-                    pch[outvar][i,:,:,j] += np.squeeze(values_p)
+                    nch[outvar][i,:,:,j] += np.squeeze(values_n*params_n[2][m])
+                    pch[outvar][i,:,:,j] += np.squeeze(values_p*params_p[2][m])
         
         self._cleanup()
         # then save data to file

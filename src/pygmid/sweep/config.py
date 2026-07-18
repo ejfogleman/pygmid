@@ -171,11 +171,11 @@ class SweepConfig(ABC):
         p.append( ['mp:cjd','F',   	[ 0,    0,    0,    0,    0,   0,    0,    0,    0,    0,    0,    0,    0,    1,    0  ]])
         p.append( ['mp:cjs','F',   	[ 0,    0,    0,    0,    0,   0,    0,    0,    0,    0,    0,    0,    0,    0,    1  ]])
         
-        n_noise.append(['mn:id', ''])
-        n_noise.append(['mn:fn', ''])
+        n_noise.append(['mn:id', '', [1, 0]])
+        n_noise.append(['mn:fn', '', [0, 1]])
         
-        p_noise.append(['mp:id', ''])
-        p_noise.append(['mp:fn', ''])
+        p_noise.append(['mp:id', '', [1, 0]])
+        p_noise.append(['mp:fn', '', [0, 1]])
         return (n, p, n_noise, p_noise)
 
 class Config(SweepConfig):

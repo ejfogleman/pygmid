@@ -145,10 +145,10 @@ class Sweep:
         """
         if sweep_type == "DC":
             filename_pattern = 'sweepvds-*_sweepvgs.dc'
-            params = [ '.'.join(k[0].split('.')[1:]) for k in self._config['n'] ]
+            params = [ ':'.join(k[0].split(':')[1:]) for k in self._config['n'] ]
         elif sweep_type == "NOISE":
             filename_pattern = 'sweepvds_noise-*_sweepvgs_noise.noise'
-            params = [ '.'.join(k[0].split('.')[1:]) for k in self._config['n_noise'] ]
+            params = [ ':'.join(k[0].split(':')[1:]) for k in self._config['n_noise'] ]
         else:
             raise ValueError(f"Unknown sweep type: {sweep_type}. Must be 'DC' or 'NOISE'.")
 
@@ -156,8 +156,8 @@ class Sweep:
         # remove directory in case it contains number. Only want to sort based on filename itself
         filelist = sorted([os.path.basename(f) for f in file_paths], key=self._extract_number_regex)
         
-        nmos = {f"mn.{param}" : np.zeros((len(self._config['SWEEP']['VGS']), len(self._config['SWEEP']['VDS']))) for param in params}
-        pmos = {f"mp.{param}" : np.zeros((len(self._config['SWEEP']['VGS']), len(self._config['SWEEP']['VDS']))) for param in params}
+        nmos = {f"mn:{param}" : np.zeros((len(self._config['SWEEP']['VGS']), len(self._config['SWEEP']['VDS']))) for param in params}
+        pmos = {f"mp:{param}" : np.zeros((len(self._config['SWEEP']['VGS']), len(self._config['SWEEP']['VDS']))) for param in params}
         for VDS_i, f in enumerate(filelist):
             # reconstruct path
             file_path = os.path.join(sweep_output_directory, f)
@@ -165,7 +165,7 @@ class Sweep:
             psf = psf_utils.PSF( file_path )
             
             for param in params:
-                nmos[f'mn.{param}'][:,VDS_i] = (psf.get_signal(f"mn.{param}").ordinate).T
-                pmos[f'mp.{param}'][:,VDS_i] = (psf.get_signal(f"mp.{param}").ordinate).T
+                nmos[f'mn:{param}'][:,VDS_i] = (psf.get_signal(f"mn:{param}").ordinate).T
+                pmos[f'mp:{param}'][:,VDS_i] = (psf.get_signal(f"mp:{param}").ordinate).T
         
         return (nmos, pmos)

@@ -57,7 +57,7 @@ class SweepConfig(ABC):
         return {
             'INFO' : self._config['MODEL']['INFO'],
             'CORNER' : self._config['MODEL']['CORNER'],
-            'TEMP' : self._config['MODEL']['TEMP'],
+            'TEMP' : float(self._config['MODEL']['TEMP']),
             'NFING' : self._config['SWEEP']['NFING'],
             'L' : np.array(self._config['SWEEP']['LENGTH']).T,
             'W' : self._config['SWEEP']['WIDTH'],

@@ -452,6 +452,9 @@ class Lookup:
         tab.field_names = ['Variable', 'Size', 'Min', 'Max']
 
         for k, v in self.__DATA.items():
+            if not isinstance(v, np.ndarray):
+                tab.add_row([k, '1', str(v), str(v)])
+                continue
 
             is_numeric = np.issubdtype(v.dtype, np.number)
 

@@ -1,0 +1,5 @@
+* Generic, non-PDK-specific BSIM4 models used only to give pygmid's ngspice
+* sweep backend a real device to simulate against in tests -- not a model
+* of any particular fabrication process.
+.model generic_nmos nmos level=14 version=4.8.2
+.model generic_pmos pmos level=14 version=4.8.2

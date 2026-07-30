@@ -79,9 +79,20 @@ class SweepConfig(ABC):
         }
     
     def _write_params(self, **kwargs):
-        paramfile = self._config['MODEL'].get('PARAMFILE', 'params.scs')
-        with open(paramfile, 'w') as outfile:
+        with open(self.paramfile, 'w') as outfile:
             outfile.write(f"parameters {' '.join([f'{k}={v}' for k, v in kwargs.items()])}")
+
+    @property
+    def paramfile(self) -> str:
+        """ The filename used for the per-simulation parameter file written by
+        `_write_params()` (e.g. sweep length/body-bias values). Defaults to
+        the `[MODEL] PARAMFILE` config key, falling back to `params.scs`.
+
+        Subclasses may override this (and `_write_params()`) if their
+        simulator requires different syntax/extension (e.g. ngspice's
+        `.param` lines vs. Spectre's `parameters` statement).
+        """
+        return self._config['MODEL'].get('PARAMFILE', 'params.scs')
 
     @property
     @abstractmethod
@@ -95,7 +106,7 @@ class SweepConfig(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _generate_outvars(self, n: list=[], p: list=[], n_noise: list=[], p_noise: list=[]) -> tuple[list, list, list, list]:
+    def _generate_outvars(self, n: list=None, p: list=None, n_noise: list=None, p_noise: list=None) -> tuple[list, list, list, list]:
         """ Generate the mapping of output variables from the simulation to the lookup table. 
         
         outvars: `['ID','VT','IGD','IGS','GM','GMB','GDS','CGG','CGS','CSG','CGD','CDG','CGB','CDD','CSS']`
@@ -173,7 +184,11 @@ class SpectreConfig(SweepConfig):
             f'}}'
         ))
 
-    def _generate_outvars(self, n: list=[], p: list=[], n_noise: list=[], p_noise: list=[]) -> tuple[list, list, list, list]:
+    def _generate_outvars(self, n: list=None, p: list=None, n_noise: list=None, p_noise: list=None) -> tuple[list, list, list, list]:
+        n = [] if n is None else n
+        p = [] if p is None else p
+        n_noise = [] if n_noise is None else n_noise
+        p_noise = [] if p_noise is None else p_noise
         n.append( ['mn:ids','A',   	[1,    0,   0,    0,    0,   0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ]])
         n.append( ['mn:vth','V',   	[0,    1,   0,    0,    0,   0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ]])
         n.append( ['mn:igd','A',   	[0,    0,   1,    0,    0,   0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ]])
@@ -257,6 +272,199 @@ class SpectreConfig(SweepConfig):
                 pmos[f'mp:{param}'][:,VDS_i] = (psf.get_signal(f"mp:{param}").ordinate).T
         
         return (nmos, pmos)
+
+
+class NgspiceConfig(SweepConfig):
+    """ ngspice-specific sweep configuration.
+
+    Both devices get independently-biased, real-polarity sources
+    (`Vgs_p`/`Vds_p`/`Vbs_p` negative) tied directly to ground -- the same
+    real-bias scheme `SpectreConfig` uses (its `vx`/`vnoi` common node is
+    only a noise-current sense point, DC-transparent, not a mirrored bias
+    topology). Despite that structural similarity, ngspice was found
+    (empirically, against ngspice-43/KLU) to report `id`/`vth` for PMOS in
+    *positive* convention here, unlike Spectre's `mp:ids`/`mp:vth`, which
+    need a `-1` coefficient. The cause appears to be a simulator-internal
+    op-point reporting convention rather than anything netlist-topology
+    related -- see the `p` coefficient table in `_generate_outvars()`.
+    """
+
+    # Raw @mn[...]/@mp[...] DC operating-point quantities saved via `wrdata`,
+    # in the fixed order shared between netlist generation (the `wrdata`
+    # argument list) and parsing (`_extract_sweep_params()`'s column order)
+    # so the two can never drift out of sync. Excludes igd/igs: they read
+    # 0.0 under nearly all models (need `igcmod=1`, and even then only the
+    # charge-based igcd/igcs split reliably comes back nonzero) -- IGD/IGS
+    # outvars are left zero-filled for Phase 1 rather than wired to an
+    # unreliable signal.
+    _DC_PARAMS = ['id', 'vth', 'gm', 'gmbs', 'gds',
+                  'cgg', 'cgs', 'cgd', 'cgb', 'cdd', 'cdg', 'css', 'csg',
+                  'capbd', 'capbs']
+
+    @property
+    def netlist_filename(self) -> str:
+        return 'pysweep.cir'
+
+    @property
+    def paramfile(self) -> str:
+        return self._config['MODEL'].get('PARAMFILE', 'params.lib')
+
+    def _write_params(self, **kwargs):
+        with open(self.paramfile, 'w') as outfile:
+            outfile.write('\n'.join(f'.param {k}={v}' for k, v in kwargs.items()))
+
+    def _generate_netlist(self) -> str:
+        # Resolved to absolute paths: `NgspiceSimulator` runs ngspice with
+        # the per-point output directory as its working directory (ngspice's
+        # `wrdata` targets are plain relative filenames baked into this
+        # netlist once -- unlike Spectre's `-raw` flag, there's no way to
+        # redirect them without changing cwd), so any relative `.include`
+        # here would resolve against the wrong directory once that happens.
+        modelfile = os.path.abspath(self._config['MODEL']['FILE'])
+        libname = self._config['MODEL'].get('LIBNAME')
+        # PDK model files are typically wrapped in `.lib libname ... .endl
+        # libname`, which needs ngspice's `.lib file libname` form (Spectre's
+        # `FILE = "..." section=NN` suffix syntax doesn't apply here). A
+        # plain `.param`/`.model`-only file with no `.lib` wrapper works with
+        # a plain `.include` instead -- set `[MODEL] LIBNAME` only when the
+        # model file has the wrapper.
+        model_include = (f'.lib {modelfile} {libname}' if libname
+                          else f'.include {modelfile}')
+
+        width = self._config['SWEEP']['WIDTH']
+        NFING = self._config['SWEEP']['NFING']
+        modeln = self._config['MODEL']['MODELN']
+        modelp = self._config['MODEL']['MODELP']
+        try:
+            mn_supplement = ' '.join(json.loads(self._config['MODEL']['MN']))
+        except json.decoder.JSONDecodeError:
+            raise "Error parsing config: make sure MN has no weird characters in it, and that the list isn't terminated with a trailing ','"
+        try:
+            mp_supplement = ' '.join(json.loads(self._config['MODEL']['MP']))
+        except json.decoder.JSONDecodeError:
+            raise "Error parsing config: make sure MP has no weird characters in it, and that the list isn't terminated with a trailing ','"
+
+        temp = float(self._config['MODEL']['TEMP']) - 273.15
+        VDS_max = max(self._config['SWEEP']['VDS'])
+        VDS_step = self._config['SWEEP']['VDS'][1] - self._config['SWEEP']['VDS'][0]
+        VGS_max = max(self._config['SWEEP']['VGS'])
+        VGS_step = self._config['SWEEP']['VGS'][1] - self._config['SWEEP']['VGS'][0]
+
+        n_probe = ' '.join(f'@mn[{p}]' for p in self._DC_PARAMS)
+        p_probe = ' '.join(f'@mp[{p}]' for p in self._DC_PARAMS)
+
+        return '\n'.join((
+            '* pysweep.cir',
+            model_include,
+            f'.include {os.path.abspath(self.paramfile)}',
+            '',
+            f'Vgs_n gate_n 0 dc 0.498',
+            f'Vds_n drain_n 0 dc 0.2',
+            f'Vbs_n bulk_n 0 dc {{-sb}}',
+            '',
+            f'Vgs_p gate_p 0 dc -0.498',
+            f'Vds_p drain_p 0 dc -0.2',
+            f'Vbs_p bulk_p 0 dc {{sb}}',
+            '',
+            f'Mn drain_n gate_n 0 bulk_n {modeln} L={{length*1e-6}} W={width}u nf={NFING} {mn_supplement}',
+            f'Mp drain_p gate_p 0 bulk_p {modelp} L={{length*1e-6}} W={width}u nf={NFING} {mp_supplement}',
+            '',
+            f'.options temp={temp} tnom=27',
+            '.control',
+            f'save all {n_probe}',
+            f'dc Vgs_n 0 {VGS_max} {VGS_step} Vds_n 0 {VDS_max} {VDS_step}',
+            f'wrdata mn.txt {n_probe}',
+            f'save all {p_probe}',
+            f'dc Vgs_p 0 {-VGS_max} {-VGS_step} Vds_p 0 {-VDS_max} {-VDS_step}',
+            f'wrdata mp.txt {p_probe}',
+            '.endc',
+            '.end',
+        ))
+
+    def _generate_outvars(self, n: list=None, p: list=None, n_noise: list=None, p_noise: list=None) -> tuple[list, list, list, list]:
+        n = [] if n is None else n
+        p = [] if p is None else p
+        n_noise = [] if n_noise is None else n_noise
+        p_noise = [] if p_noise is None else p_noise
+
+        # outvars index:      ID   VT  IGD  IGS   GM  GMB  GDS  CGG  CGS  CSG  CGD  CDG  CGB  CDD  CSS
+        n.append( ['mn:id',   'A', [1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        n.append( ['mn:vth',  'V', [0,   1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        n.append( ['mn:gm',   'S', [0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        n.append( ['mn:gmbs', 'S', [0,   0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        n.append( ['mn:gds',  'S', [0,   0,   0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        n.append( ['mn:cgg',  'F', [0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0 ]])
+        n.append( ['mn:cgs',  'F', [0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0,   0,   0,   0,   0 ]])
+        n.append( ['mn:cgd',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0,   0,   0 ]])
+        n.append( ['mn:cgb',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0 ]])
+        n.append( ['mn:cdd',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   0 ]])
+        n.append( ['mn:cdg',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0,   0 ]])
+        n.append( ['mn:css',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1 ]])
+        n.append( ['mn:csg',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0,   0,   0,   0 ]])
+        n.append( ['mn:capbd','F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   0 ]])
+        n.append( ['mn:capbs','F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1 ]])
+
+        # ngspice reports PMOS id/vth in *positive* convention here (verified
+        # empirically) -- do not copy SpectreConfig.p's -1 coefficients for
+        # these two, or values would be double-negated. This isn't a netlist
+        # topology difference (both simulators use the same real, per-device
+        # bias scheme); it appears to be a simulator-internal op-point
+        # reporting convention. Cap signs, by contrast, were verified
+        # numerically identical to the NMOS row above, so they keep the same
+        # pattern as SpectreConfig.p.
+        p.append( ['mp:id',   'A', [1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        p.append( ['mp:vth',  'V', [0,   1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        p.append( ['mp:gm',   'S', [0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        p.append( ['mp:gmbs', 'S', [0,   0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        p.append( ['mp:gds',  'S', [0,   0,   0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0,   0 ]])
+        p.append( ['mp:cgg',  'F', [0,   0,   0,   0,   0,   0,   0,   1,   0,   0,   0,   0,   0,   0,   0 ]])
+        p.append( ['mp:cgs',  'F', [0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0,   0,   0,   0,   0 ]])
+        p.append( ['mp:cgd',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0,   0,   0 ]])
+        p.append( ['mp:cgb',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0 ]])
+        p.append( ['mp:cdd',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   0 ]])
+        p.append( ['mp:cdg',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0,   0 ]])
+        p.append( ['mp:css',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1 ]])
+        p.append( ['mp:csg',  'F', [0,   0,   0,   0,   0,   0,   0,   0,   0,  -1,   0,   0,   0,   0,   0 ]])
+        p.append( ['mp:capbd','F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   0 ]])
+        p.append( ['mp:capbs','F', [0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1 ]])
+
+        # Noise is deferred for Phase 1 (ngspice's `noise` analysis exposes
+        # total output noise rather than Spectre-style per-source
+        # contributions, making an STH/SFL decomposition harder). Stub rows
+        # with zero coefficients keep Sweep.run()'s unconditional noise
+        # accumulation loop working without a real noise analysis; see the
+        # matching stub in `_extract_sweep_params()`.
+        n_noise.append(['mn:noise_stub', '', [0, 0]])
+        p_noise.append(['mp:noise_stub', '', [0, 0]])
+        return (n, p, n_noise, p_noise)
+
+    def _extract_sweep_params(self, sweep_output_directory, sweep_type="DC"):
+        """
+        Params  -> list of strings
+        size    -> len(VGS) x len(VDS)
+        """
+        n_vgs = len(self._config['SWEEP']['VGS'])
+        n_vds = len(self._config['SWEEP']['VDS'])
+
+        if sweep_type == "DC":
+            nmos = self._read_wrdata(os.path.join(sweep_output_directory, 'mn.txt'), 'mn', n_vgs, n_vds)
+            pmos = self._read_wrdata(os.path.join(sweep_output_directory, 'mp.txt'), 'mp', n_vgs, n_vds)
+            return (nmos, pmos)
+        elif sweep_type == "NOISE":
+            zeros = np.zeros((n_vgs, n_vds))
+            return ({'mn:noise_stub': zeros}, {'mp:noise_stub': zeros})
+        else:
+            raise ValueError(f"Unknown sweep type: {sweep_type}. Must be 'DC' or 'NOISE'.")
+
+    @classmethod
+    def _read_wrdata(cls, file_path, prefix, n_vgs, n_vds):
+        # wrdata interleaves a (redundant) scale column ahead of each
+        # requested vector's value column; drop the scale columns.
+        values = np.loadtxt(file_path)[:, 1::2]
+        return {
+            f'{prefix}:{param}': values[:, k].reshape((n_vds, n_vgs)).T
+            for k, param in enumerate(cls._DC_PARAMS)
+        }
 
 
 # Backward-compatible alias: existing configs/imports referring to `Config`

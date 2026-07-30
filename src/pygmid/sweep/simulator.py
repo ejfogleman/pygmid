@@ -1,5 +1,30 @@
 import subprocess
 import logging
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class Simulator(Protocol):
+    """ Structural interface every simulator backend must satisfy.
+
+    Backends are not required to subclass this -- any object providing a
+    settable `directory` property and a `run(filename)` method satisfies
+    the contract (see `SpectreSimulator` below).
+    """
+
+    @property
+    def directory(self) -> str:
+        ...
+
+    @directory.setter
+    def directory(self, dir: str) -> None:
+        ...
+
+    def run(self, filename: str):
+        """ Run the simulator on `filename`, returning the output directory
+        (or a falsy value on failure). """
+        ...
+
 
 class SpectreSimulator:
     def __init__(self, *args):

@@ -1,50 +1,52 @@
 import concurrent.futures
+import configparser
 import multiprocessing as mp
 import os
 import pickle
 import shutil
 from dataclasses import dataclass, field
-from importlib import import_module
-from pathlib import Path
-from warnings import warn
 
 import numpy as np
 from tqdm import tqdm
 
-from .config import Config, SweepConfig
-from .simulator import SpectreSimulator
+from .config import SweepConfig
+from .registry import SPECTRE_ARGS, get_simulator_backend
+from .simulator import Simulator, SpectreSimulator
 
-SPECTRE_ARGS = ['+escchars', 
-        '=log', 
-        './sweep/psf/spectre.out', 
-        '-format', 
-        'psfascii', 
-        '-raw', 
-        './sweep/psf']
+DEFAULT_SIMULATOR_NAME = 'spectre'
+
+
+def _read_simulator_name(config_file_path: str) -> str:
+    """ Peek at the `[MODEL] simulator` key of the config file, without
+    running the (potentially simulator-specific) full config parse.
+
+    Defaults to `'spectre'` if the key is absent, preserving behavior for
+    existing config files that predate the `simulator` key.
+    """
+    parser = configparser.ConfigParser()
+    parser.optionxform = str.upper
+    parser.read(config_file_path)
+    return parser.get('MODEL', 'SIMULATOR', fallback=DEFAULT_SIMULATOR_NAME)
 
 
 @dataclass
 class Sweep:
     config_file_path: str
-    _config: SweepConfig | None = field(default_factory=lambda: None, repr=False)
-    _simulator: SpectreSimulator = field(default_factory=lambda: SpectreSimulator(*SPECTRE_ARGS), repr=False)
+    _config: SweepConfig | None = field(default=None, repr=False)
+    _simulator: Simulator | None = field(default=None, repr=False)
     def __post_init__(self):
-        for f in filter(lambda p: p.suffix == ".py", map(lambda p: Path(p), os.listdir(os.getcwd()))):
-            # Import the file and check if it has a class that is a subclass of Config
-            module_name = f.stem
-            module = import_module(module_name)
-            try:
-                cls = next(filter(lambda c: isinstance(c, type) and issubclass(c, SweepConfig) and c != SweepConfig, map(lambda n: getattr(module, n), filter(lambda n: not n.startswith("__") and not n.endswith("__"), dir(module)))))
-                self._config = cls(self.config_file_path)
-                print(f"Loaded config from {f.stem}{f.suffix}")
-                #print(f"{self._config=}")
-                break
-            except StopIteration:
-                pass
+        if self._config is not None:
+            # Config supplied explicitly (e.g. by tests): only fill in a
+            # default simulator if one wasn't also supplied explicitly.
+            if self._simulator is None:
+                self._simulator = SpectreSimulator(*SPECTRE_ARGS)
+            return
 
-        if self._config is None:
-            warn("No Config subclass found in the current directory. Using default Config class.", ImportWarning)
-            self._config = Config(self.config_file_path)
+        simulator_name = _read_simulator_name(self.config_file_path)
+        config_cls, simulator_factory = get_simulator_backend(simulator_name)
+        self._config = config_cls(self.config_file_path)
+        if self._simulator is None:
+            self._simulator = simulator_factory()
     
     def run(self):
         

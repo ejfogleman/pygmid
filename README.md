@@ -125,9 +125,104 @@ The generic PDK data is hosted <a href="https://github.com/bmurmann/Book-on-gm-I
 
 ### Sweeping a Technology
 
-`pygmid` also features a CLI which can be used to run techweeps to generate transistor data.
+`pygmid` also features a CLI which drives a SPICE simulator across a grid of `(L, VSB, VGS, VDS)`
+points to build the characterization tables consumed by `Lookup`. Two simulator backends are
+currently supported: **Spectre** (default) and **ngspice**.
 
-*Documentation will be added in due course. This functionality is in a state of flux.*
+Run a sweep with:
+
+```bash
+python -m pygmid --mode sweep --config config.cfg
+```
+
+This writes two pickle files, `<SAVEFILEN>.pkl` and `<SAVEFILEP>.pkl`, which can be loaded directly
+with `Lookup`:
+
+```python
+from pygmid import Lookup as lk
+
+NCH = lk('90n1rvt.pkl')
+```
+
+Pass `--skip-run` to validate/parse a config without invoking the simulator (useful for testing a
+config file).
+
+#### Config file format
+
+The config file is INI-style with two sections, `[MODEL]` and `[SWEEP]`. Keys are case-insensitive.
+
+`[MODEL]`:
+
+| Key | Description |
+| --- | --- |
+| `simulator` | Which backend to use: `spectre` (default if omitted) or `ngspice`. |
+| `file` | Path to the model file. For Spectre this may include a `section=` suffix (e.g. `"path/to/models.scs" section=NN`). For ngspice, a plain path; pair with `libname` below if the file is wrapped in a `.lib ... .endl` block. |
+| `libname` | *(ngspice only, optional)* Library name to pass to `.lib <file> <libname>`. Omit for model files with no `.lib`/`.endl` wrapper — a plain `.include` is used instead. |
+| `info` | Free-text description, stored as metadata in the output table. |
+| `corner` | Process corner label, stored as metadata. |
+| `temp` | Temperature in Kelvin. |
+| `modeln` / `modelp` | NMOS/PMOS model names to instantiate in the generated netlist. |
+| `savefilen` / `savefilep` | Base filename (no extension) for the NMOS/PMOS output `.pkl` files. |
+| `paramfile` | Filename for the per-simulation-point parameter file (length, body bias). Defaults to `params.scs` (Spectre) or `params.lib` (ngspice). |
+| `mn` / `mp` | JSON list of extra per-device instance parameter lines appended to the NMOS/PMOS device statement (e.g. layout-dependent parasitics). Use `[]` if not needed — see the indentation note below. |
+
+`[SWEEP]`:
+
+| Key | Description |
+| --- | --- |
+| `VGS` / `VDS` / `VSB` | A `(start, step, stop)` tuple, or a list of such tuples for piecewise ranges. |
+| `LENGTH` | A list of `(start, step, stop)` tuples — the channel lengths to sweep, in µm. |
+| `WIDTH` | Total device width, in µm. |
+| `NFING` | Number of fingers. |
+
+A minimal ngspice example (see `tests/pygmid/sweep/config_ngspice.cfg` for the full sample used in
+tests):
+
+```ini
+[MODEL]
+simulator = ngspice
+file = generic_bsim4.lib
+info = Generic BSIM4
+corner = TT
+temp = 300
+modeln = generic_nmos
+modelp = generic_pmos
+savefilen = ngspice_test_n
+savefilep = ngspice_test_p
+paramfile = params.lib
+mn = []
+mp = []
+
+[SWEEP]
+VGS = (0,0.6,1.8)
+VDS = (0,0.9,1.8)
+VSB = (0,0.5,0.5)
+LENGTH = [(1,0.5,1)]
+WIDTH = 10
+NFING = 1
+```
+
+`mn`/`mp` is a plain JSON list of strings, each one an extra instance parameter appended to the
+device statement (`key=value`, or an expression). If the list spans multiple lines, make sure each
+continuation line is indented (configparser treats an indented line as a continuation of the
+previous value — an unindented one is parsed as a new, duplicate key and raises
+`DuplicateOptionError`), and that the list isn't left with a trailing comma, e.g.:
+
+```ini
+mn = ["l=L w=Wtot m=1",
+    "ad=100"]
+```
+
+A trailing `\` inside a string (as in the Spectre sample config) is only needed if that particular
+line is itself a Spectre netlist continuation — it's not part of the `mn`/`mp` syntax itself.
+
+#### Adding a simulator backend
+
+Backends are registered in `pygmid.sweep.SIMULATOR_REGISTRY`, keyed by the `simulator` config value.
+Adding a new one means implementing a `SweepConfig` subclass (netlist generation, output-variable
+mapping, and output parsing) and a class satisfying the `Simulator` protocol (a `directory` property
+and a `run(filename)` method), then registering the pair — no changes to the sweep driver itself are
+required.
 
 ## Citation
 
@@ -155,5 +250,6 @@ If you find this package useful in your research, please consider citing the fol
 ## Contributors
 
 - José Rui Custódio
+- Eric Fogleman
 
 A special thanks to Prof. Boris Murmann for giving permission to use his work and release this package under the Apache 2.0 License.

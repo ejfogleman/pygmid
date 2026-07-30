@@ -1,9 +1,7 @@
 import concurrent.futures
-import glob
 import multiprocessing as mp
 import os
 import pickle
-import re
 import shutil
 from dataclasses import dataclass, field
 from importlib import import_module
@@ -11,7 +9,6 @@ from pathlib import Path
 from warnings import warn
 
 import numpy as np
-import psf_utils
 from tqdm import tqdm
 
 from .config import Config, SweepConfig
@@ -74,7 +71,7 @@ class Sweep:
                     
                     sim_path = f"./sweep/psf_{i}_{j}"
                     self._simulator.directory = sim_path
-                    cp = self._simulator.run('pysweep.scs')
+                    cp = self._simulator.run(self._config.netlist_filename)
 
                     futures.append(executor.submit(self.parse_sim, *[sim_path]))
             
@@ -116,56 +113,16 @@ class Sweep:
         i = int(fileparts[-2])
         j = int(fileparts[-1])
         
-        (n_dict, p_dict) = self._extract_sweep_params(filepath)
+        (n_dict, p_dict) = self._config._extract_sweep_params(filepath)
         
-        (nn_dict, pn_dict) = self._extract_sweep_params(filepath, sweep_type="NOISE")
+        (nn_dict, pn_dict) = self._config._extract_sweep_params(filepath, sweep_type="NOISE")
 
         return i, j, n_dict, p_dict, nn_dict, pn_dict
     
     def _cleanup(self):
         try:
             shutil.rmtree("./sweep")
-            os.remove("pysweep.scs")
+            os.remove(self._config.netlist_filename)
             os.remove("params.scs")
         except OSError as e:
             print("Could not perform cleanup:\nFile - {e.filename}\nError - {e.strerror}")
-
-    def _extract_number_regex(self, string):
-        pattern = r'\d+'  # Matches one or more digits
-        match = re.search(pattern, string)
-        if match:
-            return int(match.group())  # Extracted number as an integer
-        else:
-            return None
-
-    def _extract_sweep_params(self, sweep_output_directory, sweep_type="DC"):
-        """
-        Params  -> list of strings
-        size    -> len(VGS) x len(VDS)
-        """
-        if sweep_type == "DC":
-            filename_pattern = 'sweepvds-*_sweepvgs.dc'
-            params = [ ':'.join(k[0].split(':')[1:]) for k in self._config['n'] ]
-        elif sweep_type == "NOISE":
-            filename_pattern = 'sweepvds_noise-*_sweepvgs_noise.noise'
-            params = [ ':'.join(k[0].split(':')[1:]) for k in self._config['n_noise'] ]
-        else:
-            raise ValueError(f"Unknown sweep type: {sweep_type}. Must be 'DC' or 'NOISE'.")
-
-        file_paths = glob.glob(os.path.join(sweep_output_directory, filename_pattern))
-        # remove directory in case it contains number. Only want to sort based on filename itself
-        filelist = sorted([os.path.basename(f) for f in file_paths], key=self._extract_number_regex)
-        
-        nmos = {f"mn:{param}" : np.zeros((len(self._config['SWEEP']['VGS']), len(self._config['SWEEP']['VDS']))) for param in params}
-        pmos = {f"mp:{param}" : np.zeros((len(self._config['SWEEP']['VGS']), len(self._config['SWEEP']['VDS']))) for param in params}
-        for VDS_i, f in enumerate(filelist):
-            # reconstruct path
-            file_path = os.path.join(sweep_output_directory, f)
-            # need to extract parameter from PSFs
-            psf = psf_utils.PSF( file_path )
-            
-            for param in params:
-                nmos[f'mn:{param}'][:,VDS_i] = (psf.get_signal(f"mn:{param}").ordinate).T
-                pmos[f'mp:{param}'][:,VDS_i] = (psf.get_signal(f"mp:{param}").ordinate).T
-        
-        return (nmos, pmos)

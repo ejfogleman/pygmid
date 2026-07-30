@@ -1,9 +1,15 @@
-import numpy as np
+import glob
 import json
+import os
+import re
 import ast
 import configparser
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
+
+import numpy as np
+import psf_utils
+
 
 def matrange(start, step, stop):
     num = round((stop - start) / step + 1)
@@ -15,6 +21,12 @@ def toupper(optionstr: str) -> str:
 
 @dataclass
 class SweepConfig(ABC):
+    """ Generic, simulator-agnostic sweep configuration base class.
+
+    Subclasses are responsible for all simulator-specific behavior:
+    generating the netlist, mapping simulator output signals to lookup-table
+    outvars, and parsing simulator output into per-(VGS, VDS) slices.
+    """
     config_file_path: str
     _configParser: configparser.ConfigParser = field(default_factory=configparser.ConfigParser, repr=False)
     _config: dict = field(init=False)
@@ -24,7 +36,7 @@ class SweepConfig(ABC):
         self._configParser.read(self.config_file_path)
         self._config = {s:dict(self._configParser.items(s)) for s in self._configParser.sections()}
         self._parse_ranges()
-        with open('pysweep.scs', 'w') as netlist_file:
+        with open(self.netlist_filename, 'w') as netlist_file:
             netlist_file.write(self._generate_netlist())
 
         self._config['outvars'] = 	['ID','VT','IGD','IGS','GM','GMB','GDS','CGG','CGS','CSG','CGD','CDG','CGB','CDD','CSS']
@@ -70,10 +82,46 @@ class SweepConfig(ABC):
         paramfile = self._config['MODEL'].get('PARAMFILE', 'params.scs')
         with open(paramfile, 'w') as outfile:
             outfile.write(f"parameters {' '.join([f'{k}={v}' for k, v in kwargs.items()])}")
-        
+
+    @property
+    @abstractmethod
+    def netlist_filename(self) -> str:
+        """ The filename to use for the generated netlist. """
+        raise NotImplementedError
+
     @abstractmethod
     def _generate_netlist(self) -> str:
         """ Generate the netlist for the simulation. """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _generate_outvars(self, n: list=[], p: list=[], n_noise: list=[], p_noise: list=[]) -> tuple[list, list, list, list]:
+        """ Generate the mapping of output variables from the simulation to the lookup table. 
+        
+        outvars: `['ID','VT','IGD','IGS','GM','GMB','GDS','CGG','CGS','CSG','CGD','CDG','CGB','CDD','CSS']`
+        outvars_noise: `['STH','SFL']`
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _extract_sweep_params(self, sweep_output_directory, sweep_type="DC"):
+        """ Parse simulator output for a single sim directory into per-(VGS, VDS) slices.
+
+        Returns a tuple `(nmos, pmos)` of dicts, keyed by fully-qualified signal
+        name (e.g. `mn:ids`), each holding a `len(VGS) x len(VDS)` array.
+        """
+        raise NotImplementedError
+
+
+class SpectreConfig(SweepConfig):
+    """ Spectre-specific sweep configuration. """
+
+    @property
+    def netlist_filename(self) -> str:
+        return 'pysweep.scs'
+
+    def _generate_netlist(self) -> str:
         modelfile = self._config['MODEL']['FILE']
         paramfile = self._config['MODEL'].get('PARAMFILE', 'params.scs')
         width = self._config['SWEEP']['WIDTH']
@@ -124,17 +172,8 @@ class SweepConfig(ABC):
             f'	sweepvgs_noise noise freq=1 oprobe=vnoi param=gs start=0 stop={VGS_max} step={VGS_step}', 
             f'}}'
         ))
-        with open('pysweep.scs', 'w') as outfile:
-            outfile.write('\n'.join(netlist))
-    
-    @abstractmethod
-    def _generate_outvars(self, n: list=[], p: list=[], n_noise: list=[], p_noise: list=[]) -> tuple[list, list, list, list]:
-        """ Generate the mapping of output variables from the simulation to the lookup table. 
-        
-        outvars: `['ID','VT','IGD','IGS','GM','GMB','GDS','CGG','CGS','CSG','CGD','CDG','CGB','CDD','CSS']`
-        outvars_noise: `['STH','SFL']`
 
-        """
+    def _generate_outvars(self, n: list=[], p: list=[], n_noise: list=[], p_noise: list=[]) -> tuple[list, list, list, list]:
         n.append( ['mn:ids','A',   	[1,    0,   0,    0,    0,   0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ]])
         n.append( ['mn:vth','V',   	[0,    1,   0,    0,    0,   0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ]])
         n.append( ['mn:igd','A',   	[0,    0,   1,    0,    0,   0,    0,    0,    0,    0,    0,    0,    0,    0,    0  ]])
@@ -178,13 +217,48 @@ class SweepConfig(ABC):
         p_noise.append(['mp:fn', '', [0, 1]])
         return (n, p, n_noise, p_noise)
 
-class Config(SweepConfig):
-    """ Configuration class for the sweep simulation. """
-    def __post_init__(self):
-        super().__post_init__()
-    
-    def _generate_netlist(self):
-        return super()._generate_netlist()
-    
-    def _generate_outvars(self, *args, **kwargs):
-        return super()._generate_outvars(*args, **kwargs)
+    @staticmethod
+    def _extract_number_regex(string):
+        pattern = r'\d+'  # Matches one or more digits
+        match = re.search(pattern, string)
+        if match:
+            return int(match.group())  # Extracted number as an integer
+        else:
+            return None
+
+    def _extract_sweep_params(self, sweep_output_directory, sweep_type="DC"):
+        """
+        Params  -> list of strings
+        size    -> len(VGS) x len(VDS)
+        """
+        if sweep_type == "DC":
+            filename_pattern = 'sweepvds-*_sweepvgs.dc'
+            params = [ ':'.join(k[0].split(':')[1:]) for k in self._config['n'] ]
+        elif sweep_type == "NOISE":
+            filename_pattern = 'sweepvds_noise-*_sweepvgs_noise.noise'
+            params = [ ':'.join(k[0].split(':')[1:]) for k in self._config['n_noise'] ]
+        else:
+            raise ValueError(f"Unknown sweep type: {sweep_type}. Must be 'DC' or 'NOISE'.")
+
+        file_paths = glob.glob(os.path.join(sweep_output_directory, filename_pattern))
+        # remove directory in case it contains number. Only want to sort based on filename itself
+        filelist = sorted([os.path.basename(f) for f in file_paths], key=self._extract_number_regex)
+        
+        nmos = {f"mn:{param}" : np.zeros((len(self._config['SWEEP']['VGS']), len(self._config['SWEEP']['VDS']))) for param in params}
+        pmos = {f"mp:{param}" : np.zeros((len(self._config['SWEEP']['VGS']), len(self._config['SWEEP']['VDS']))) for param in params}
+        for VDS_i, f in enumerate(filelist):
+            # reconstruct path
+            file_path = os.path.join(sweep_output_directory, f)
+            # need to extract parameter from PSFs
+            psf = psf_utils.PSF( file_path )
+            
+            for param in params:
+                nmos[f'mn:{param}'][:,VDS_i] = (psf.get_signal(f"mn:{param}").ordinate).T
+                pmos[f'mp:{param}'][:,VDS_i] = (psf.get_signal(f"mp:{param}").ordinate).T
+        
+        return (nmos, pmos)
+
+
+# Backward-compatible alias: existing configs/imports referring to `Config`
+# continue to work unchanged.
+Config = SpectreConfig

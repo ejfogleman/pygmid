@@ -9,7 +9,7 @@ and a `Simulator`-compatible class, then adding one entry here -- no
 changes to `Sweep` itself are required.
 """
 
-from .config import SpectreConfig, NgspiceConfig
+from .config import SpectreConfig, NgspiceConfig, NgspiceSky130Config, NgspiceGf180Config
 from .simulator import SpectreSimulator, NgspiceSimulator
 
 # Command-line arguments passed to `spectre` on every invocation. The last
@@ -30,6 +30,8 @@ SPECTRE_ARGS = ['+escchars',
 SIMULATOR_REGISTRY = {
     'spectre': (SpectreConfig, lambda: SpectreSimulator(*SPECTRE_ARGS)),
     'ngspice': (NgspiceConfig, NgspiceSimulator),
+    'ngspice_sky130':  (NgspiceSky130Config, NgspiceSimulator),
+    'ngspice_gf180':   (NgspiceGf180Config, NgspiceSimulator),
 }
 
 

@@ -62,8 +62,8 @@ class SweepConfig(ABC):
             v = [val for r in v for val in r] 
             self._config['SWEEP'][k] = v
     
-        for k in ['WIDTH', 'NFING']:
-            self._config['SWEEP'][k] = int(self._config['SWEEP'][k])
+        self._config['SWEEP']['WIDTH'] = float(self._config['SWEEP']['WIDTH'])
+        self._config['SWEEP']['NFING'] = int(self._config['SWEEP']['NFING'])
     
     def generate_m_dict(self):
         return {
@@ -313,6 +313,22 @@ class NgspiceConfig(SweepConfig):
         with open(self.paramfile, 'w') as outfile:
             outfile.write('\n'.join(f'.param {k}={v}' for k, v in kwargs.items()))
 
+    def _extra_includes(self) -> list:
+        """ `.include` lines for auxiliary files a PDK's model needs beyond
+        the main `[MODEL] FILE`/`LIBNAME` include -- e.g. gf180mcuD's
+        `design.ngspice`, which defines `sw_stat_mismatch`/`sw_stat_global`
+        referenced by the model body and is otherwise left undefined.
+        Optional `[MODEL] EXTRA_INCLUDE` config key, a JSON list of paths,
+        mirroring the existing `MN`/`MP` supplement convention. Resolved to
+        absolute paths for the same reason `modelfile`/`paramfile` are in
+        `_generate_netlist()`.
+        """
+        try:
+            paths = json.loads(self._config['MODEL'].get('EXTRA_INCLUDE', '[]'))
+        except json.decoder.JSONDecodeError:
+            raise ValueError("Error parsing config: EXTRA_INCLUDE must be a JSON list of paths, with no trailing ','")
+        return [f'.include {os.path.abspath(p)}' for p in paths]
+
     def _generate_netlist(self) -> str:
         # Resolved to absolute paths: `NgspiceSimulator` runs ngspice with
         # the per-point output directory as its working directory (ngspice's
@@ -355,6 +371,7 @@ class NgspiceConfig(SweepConfig):
 
         return '\n'.join((
             '* pysweep.cir',
+            *self._extra_includes(),
             model_include,
             f'.include {os.path.abspath(self.paramfile)}',
             '',
@@ -465,6 +482,186 @@ class NgspiceConfig(SweepConfig):
             f'{prefix}:{param}': values[:, k].reshape((n_vds, n_vgs)).T
             for k, param in enumerate(cls._DC_PARAMS)
         }
+
+
+class SubcircuitNgspiceConfig(NgspiceConfig):
+    """ ngspice sweep configuration for PDK devices that wrap their BSIM4
+    core model in a `.subckt` (sky130, gf180mcuD) rather than exposing a
+    flat M-instance the way `NgspiceConfig` assumes. Emits `X`-prefixed
+    instances and probes the internal MOSFET the subcircuit expands to via
+    `@m.<Xinst>.<name>[param]` instead of `@mn[param]`.
+
+    The ad/as/pd/ps/nrd/nrs junction-geometry formula in `_instance_tail()`
+    is shared across subclasses -- verified identical in shape (differing
+    only by one PDK-specific diffusion-spacing constant) against two real,
+    currently-used proc_char testbenches: `tb_ejf_sacomp.spice` (sky130)
+    and `tb_gf180mcu.spice` (gf180mcuD). Probe paths, the sign of PMOS
+    id/vth (unchanged `+1`, same as the flat device -- inherited from
+    `NgspiceConfig._generate_outvars()`), and the unit conventions each
+    subclass declares were all confirmed with a real `ngspice -b` run
+    against `~/.ciel/sky130B`/`~/.ciel/gf180mcuD`.
+    """
+
+    @property
+    @abstractmethod
+    def _diffusion_spacing(self) -> float:
+        """ Contact-to-gate diffusion spacing (um) used in the shared
+        ad/as/pd/ps/nrd/nrs formula below. sky130: 0.29, gf180: 0.18.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _geom(self, value: float) -> str:
+        """ Render a um-valued length/area/perimeter number in this PDK's
+        convention: bare (sky130 -- relies on the target model file's own
+        `.options parser scale=1.0u`, pulled in transitively via the
+        standard `.lib sky130.lib.spice <corner>` include) or `u`-suffixed
+        (gf180 -- no such directive available). Used for W/ad/as/pd/ps;
+        NOT for nrd/nrs, which are dimensionless ratios (spacing/width)
+        and never need a unit suffix either way.
+        """
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def _length_expr(self) -> str:
+        """ ngspice expression for the per-point-swept L=, in this PDK's
+        unit convention. Must stay symbolic -- it references the {length}
+        `.param` `_write_params()` rewrites per sweep point, and the
+        netlist is only generated once (`SweepConfig.__post_init__`), so
+        this can never be resolved to a Python float at netlist-generation
+        time. sky130: '{length}' (bare, scale-parser handles it). gf180:
+        '{length*1e-6}' (explicit meters -- matches how `NgspiceConfig`'s
+        own flat L= already works, since gf180 has no scale-parser).
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _internal_probe_name(self, modelname: str) -> str:
+        """ Lowercase name of the M-device ngspice exposes inside the
+        expanded X-instance subcircuit, for @m.<Xinst>.<name>[param]
+        probing.
+        """
+        raise NotImplementedError
+
+    def _instance_tail(self, width, nf) -> str:
+        spacing = self._diffusion_spacing
+        ad = int((nf+1)/2) * width/nf * spacing
+        as_ = int((nf+2)/2) * width/nf * spacing
+        pd = 2*int((nf+1)/2) * (width/nf + spacing)
+        ps = 2*int((nf+2)/2) * (width/nf + spacing)
+        nrd = nrs = spacing / width
+        return (f"W={self._geom(width)} nf={nf} "
+                f"ad={self._geom(ad)} as={self._geom(as_)} "
+                f"pd={self._geom(pd)} ps={self._geom(ps)} "
+                f"nrd={nrd} nrs={nrs} sa=0 sb=0 sd=0")
+
+    def _generate_netlist(self) -> str:
+        modelfile = os.path.abspath(self._config['MODEL']['FILE'])
+        libname = self._config['MODEL'].get('LIBNAME')
+        model_include = (f'.lib {modelfile} {libname}' if libname
+                          else f'.include {modelfile}')
+
+        width = self._config['SWEEP']['WIDTH']
+        NFING = self._config['SWEEP']['NFING']
+        modeln = self._config['MODEL']['MODELN']
+        modelp = self._config['MODEL']['MODELP']
+        try:
+            mn_supplement = ' '.join(json.loads(self._config['MODEL']['MN']))
+        except json.decoder.JSONDecodeError:
+            raise "Error parsing config: make sure MN has no weird characters in it, and that the list isn't terminated with a trailing ','"
+        try:
+            mp_supplement = ' '.join(json.loads(self._config['MODEL']['MP']))
+        except json.decoder.JSONDecodeError:
+            raise "Error parsing config: make sure MP has no weird characters in it, and that the list isn't terminated with a trailing ','"
+
+        temp = float(self._config['MODEL']['TEMP']) - 273.15
+        VDS_max = max(self._config['SWEEP']['VDS'])
+        VDS_step = self._config['SWEEP']['VDS'][1] - self._config['SWEEP']['VDS'][0]
+        VGS_max = max(self._config['SWEEP']['VGS'])
+        VGS_step = self._config['SWEEP']['VGS'][1] - self._config['SWEEP']['VGS'][0]
+
+        n_probe = ' '.join(f'@m.xmn.{self._internal_probe_name(modeln)}[{p}]' for p in self._DC_PARAMS)
+        p_probe = ' '.join(f'@m.xmp.{self._internal_probe_name(modelp)}[{p}]' for p in self._DC_PARAMS)
+
+        return '\n'.join((
+            '* pysweep.cir',
+            *self._extra_includes(),
+            model_include,
+            f'.include {os.path.abspath(self.paramfile)}',
+            '',
+            f'Vgs_n gate_n 0 dc 0.498',
+            f'Vds_n drain_n 0 dc 0.2',
+            f'Vbs_n bulk_n 0 dc {{-sb}}',
+            '',
+            f'Vgs_p gate_p 0 dc -0.498',
+            f'Vds_p drain_p 0 dc -0.2',
+            f'Vbs_p bulk_p 0 dc {{sb}}',
+            '',
+            f'Xmn drain_n gate_n 0 bulk_n {modeln} L={self._length_expr} {self._instance_tail(width, NFING)} {mn_supplement}',
+            f'Xmp drain_p gate_p 0 bulk_p {modelp} L={self._length_expr} {self._instance_tail(width, NFING)} {mp_supplement}',
+            '',
+            f'.options temp={temp} tnom=27',
+            '.control',
+            f'save all {n_probe}',
+            f'dc Vgs_n 0 {VGS_max} {VGS_step} Vds_n 0 {VDS_max} {VDS_step}',
+            f'wrdata mn.txt {n_probe}',
+            f'save all {p_probe}',
+            f'dc Vgs_p 0 {-VGS_max} {-VGS_step} Vds_p 0 {-VDS_max} {-VDS_step}',
+            f'wrdata mp.txt {p_probe}',
+            '.endc',
+            '.end',
+        ))
+
+
+class NgspiceSky130Config(SubcircuitNgspiceConfig):
+    """ SkyWater sky130 (`sky130_fd_pr__nfet_01v8`/`pfet_01v8`). Bare-um
+    length units -- relies on `.options parser scale=1.0u`, which the
+    standard `.lib sky130.lib.spice <corner>` include (set via `[MODEL]
+    LIBNAME`) pulls in transitively. Verified against `~/.ciel/sky130B`
+    and a real proc_char testbench (`tb_ejf_sacomp.spice`).
+    """
+
+    @property
+    def _diffusion_spacing(self) -> float:
+        return 0.29
+
+    def _geom(self, value: float) -> str:
+        return f"{value}"
+
+    @property
+    def _length_expr(self) -> str:
+        return '{length}'
+
+    def _internal_probe_name(self, modelname: str) -> str:
+        return f"m{modelname.lower()}"
+
+
+class NgspiceGf180Config(SubcircuitNgspiceConfig):
+    """ GlobalFoundries gf180mcuD (`nfet_03v3`/`pfet_03v3`). Raw-meter
+    length units (explicit `u` suffixes) -- no scale-parser directive
+    available, unlike sky130. Verified against `~/.ciel/gf180mcuD` and a
+    real proc_char testbench (`tb_gf180mcu.spice`). Requires `[MODEL]
+    EXTRA_INCLUDE` pointed at the PDK's `design.ngspice` (defines
+    `sw_stat_mismatch`/`sw_stat_global`, referenced by the model body and
+    otherwise left undefined). The `m=1` multiplier the PDK subckt exposes
+    goes through the existing `[MODEL] MN`/`MP` supplement, not a
+    dedicated hook.
+    """
+
+    @property
+    def _diffusion_spacing(self) -> float:
+        return 0.18
+
+    def _geom(self, value: float) -> str:
+        return f"{value}u"
+
+    @property
+    def _length_expr(self) -> str:
+        return '{length*1e-6}'
+
+    def _internal_probe_name(self, modelname: str) -> str:
+        return "m0"
 
 
 # Backward-compatible alias: existing configs/imports referring to `Config`

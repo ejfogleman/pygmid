@@ -126,8 +126,10 @@ The generic PDK data is hosted <a href="https://github.com/bmurmann/Book-on-gm-I
 ### Sweeping a Technology
 
 `pygmid` also features a CLI which drives a SPICE simulator across a grid of `(L, VSB, VGS, VDS)`
-points to build the characterization tables consumed by `Lookup`. Two simulator backends are
-currently supported: **Spectre** (default) and **ngspice**.
+points to build the characterization tables consumed by `Lookup`. Simulator backends currently
+supported: **Spectre** (default), **ngspice** (flat `M`-instance devices), and two ngspice variants
+for PDK devices that wrap their model in a `.subckt` — **sky130** (`ngspice_sky130`) and
+**gf180mcuD** (`ngspice_gf180`).
 
 Run a sweep with:
 
@@ -155,9 +157,10 @@ The config file is INI-style with two sections, `[MODEL]` and `[SWEEP]`. Keys ar
 
 | Key | Description |
 | --- | --- |
-| `simulator` | Which backend to use: `spectre` (default if omitted) or `ngspice`. |
+| `simulator` | Which backend to use: `spectre` (default if omitted), `ngspice`, `ngspice_sky130`, or `ngspice_gf180`. See `pygmid.sweep.SIMULATOR_REGISTRY` for the authoritative list. |
 | `file` | Path to the model file. For Spectre this may include a `section=` suffix (e.g. `"path/to/models.scs" section=NN`). For ngspice, a plain path; pair with `libname` below if the file is wrapped in a `.lib ... .endl` block. |
 | `libname` | *(ngspice only, optional)* Library name to pass to `.lib <file> <libname>`. Omit for model files with no `.lib`/`.endl` wrapper — a plain `.include` is used instead. |
+| `extra_include` | *(ngspice only, optional)* JSON list of additional file paths to `.include` before the main model file — e.g. `ngspice_gf180` needs this pointed at the PDK's `design.ngspice`, which defines globals (`sw_stat_mismatch`/`sw_stat_global`) the model body references but that aren't in the model file itself. Not needed for sky130. Omit or use `[]` if not needed. |
 | `info` | Free-text description, stored as metadata in the output table. |
 | `corner` | Process corner label, stored as metadata. |
 | `temp` | Temperature in Kelvin. |
@@ -201,6 +204,75 @@ LENGTH = [(1,0.5,1)]
 WIDTH = 10
 NFING = 1
 ```
+
+##### sky130 and gf180mcuD (subcircuit devices)
+
+`ngspice_sky130` and `ngspice_gf180` target PDK devices whose model is wrapped in a `.subckt`
+(`sky130_fd_pr__nfet_01v8`/`pfet_01v8`, `nfet_03v3`/`pfet_03v3`) rather than a flat `M`-instance.
+Junction/parasitic parameters (`ad`/`as`/`pd`/`ps`/`nrd`/`nrs`/`sa`/`sb`/`sd`) are computed
+automatically — leave `mn`/`mp` as `[]` unless you need to override something beyond that (e.g. a
+non-default multiplier).
+
+sky130:
+
+```ini
+[MODEL]
+simulator = ngspice_sky130
+file = /path/to/sky130/libs.tech/combined/sky130.lib.spice
+libname = tt
+info = SkyWater sky130_fd_pr__nfet_01v8/pfet_01v8, tt corner
+corner = TT
+temp = 300
+modeln = sky130_fd_pr__nfet_01v8
+modelp = sky130_fd_pr__pfet_01v8
+savefilen = sky130_01v8_n
+savefilep = sky130_01v8_p
+paramfile = params.lib
+mn = []
+mp = []
+
+[SWEEP]
+VGS = (0,0.02,1.8)
+VDS = (0,0.1,1.8)
+VSB = (0,0.3,0.9)
+LENGTH = [(0.15,0.05,0.5),(0.6,0.2,1.0)]
+WIDTH = 1
+NFING = 1
+```
+
+`file`/`libname` must point at the full corner-processed `.lib` (not a bare model-only file) — it
+carries a `.options parser scale=1.0u` directive that `ngspice_sky130` relies on for bare-µm units.
+
+gf180mcuD:
+
+```ini
+[MODEL]
+simulator = ngspice_gf180
+file = /path/to/gf180mcuD/libs.tech/ngspice/sm141064.ngspice
+libname = typical
+extra_include = ["/path/to/gf180mcuD/libs.tech/ngspice/design.ngspice"]
+info = GlobalFoundries gf180mcuD nfet_03v3/pfet_03v3, typical corner
+corner = TT
+temp = 300
+modeln = nfet_03v3
+modelp = pfet_03v3
+savefilen = gf180_03v3_n
+savefilep = gf180_03v3_p
+paramfile = params.lib
+mn = []
+mp = []
+
+[SWEEP]
+VGS = (0,0.05,3.3)
+VDS = (0,0.1,3.3)
+VSB = (0,0.5,1.5)
+LENGTH = [(0.28,0.05,0.6),(0.8,0.2,1.2)]
+WIDTH = 1
+NFING = 1
+```
+
+`extra_include` is required here (unlike sky130) — without it, ngspice errors on the model body's
+undefined `sw_stat_mismatch`/`sw_stat_global` references.
 
 `mn`/`mp` is a plain JSON list of strings, each one an extra instance parameter appended to the
 device statement (`key=value`, or an expression). If the list spans multiple lines, make sure each

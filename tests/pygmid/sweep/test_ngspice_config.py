@@ -46,6 +46,21 @@ def test_netlist_uses_lib_when_libname_set(tmp_path, monkeypatch):
     assert any(line.startswith('.lib') and 'generic_bsim4.lib tt' in line for line in lines)
 
 
+def test_netlist_omits_extra_include_by_default(cfg):
+    netlist = Path(cfg.netlist_filename).read_text()
+    assert 'extra.lib' not in netlist
+
+
+def test_netlist_includes_extra_include_before_model(tmp_path, monkeypatch):
+    cfg_path = _write_config(tmp_path, extra_model_lines='extra_include = ["extra.lib"]\n')
+    monkeypatch.chdir(tmp_path)
+    ngcfg = NgspiceConfig(cfg_path.name)
+    lines = Path(ngcfg.netlist_filename).read_text().splitlines()
+    extra_idx = next(i for i, l in enumerate(lines) if l.startswith('.include') and 'extra.lib' in l)
+    model_idx = next(i for i, l in enumerate(lines) if 'generic_bsim4.lib' in l)
+    assert extra_idx < model_idx
+
+
 def test_netlist_has_independent_real_polarity_bias(cfg):
     netlist = Path(cfg.netlist_filename).read_text()
     for src in ('Vgs_n', 'Vds_n', 'Vbs_n', 'Vgs_p', 'Vds_p', 'Vbs_p'):

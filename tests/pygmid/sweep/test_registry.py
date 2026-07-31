@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from pygmid.sweep import SIMULATOR_REGISTRY, get_simulator_backend
-from pygmid.sweep.config import SpectreConfig, NgspiceConfig
+from pygmid.sweep.config import SpectreConfig, NgspiceConfig, NgspiceSky130Config, NgspiceGf180Config
 from pygmid.sweep.simulator import SpectreSimulator, NgspiceSimulator
 from pygmid.sweep.sweep import Sweep
 
@@ -91,3 +91,17 @@ def test_sweep_honors_ngspice_simulator_key(tmp_path, monkeypatch):
     swp = Sweep(str(cfg_path))
     assert isinstance(swp._config, NgspiceConfig)
     assert isinstance(swp._simulator, NgspiceSimulator)
+
+
+def test_registry_contains_sky130_backend():
+    assert 'ngspice_sky130' in SIMULATOR_REGISTRY
+    config_cls, simulator_factory = SIMULATOR_REGISTRY['ngspice_sky130']
+    assert config_cls is NgspiceSky130Config
+    assert isinstance(simulator_factory(), NgspiceSimulator)
+
+
+def test_registry_contains_gf180_backend():
+    assert 'ngspice_gf180' in SIMULATOR_REGISTRY
+    config_cls, simulator_factory = SIMULATOR_REGISTRY['ngspice_gf180']
+    assert config_cls is NgspiceGf180Config
+    assert isinstance(simulator_factory(), NgspiceSimulator)

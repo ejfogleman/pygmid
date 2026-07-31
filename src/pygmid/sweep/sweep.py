@@ -125,6 +125,6 @@ class Sweep:
         try:
             shutil.rmtree("./sweep")
             os.remove(self._config.netlist_filename)
-            os.remove("params.scs")
+            os.remove(self._config.paramfile)
         except OSError as e:
-            print("Could not perform cleanup:\nFile - {e.filename}\nError - {e.strerror}")
+            print(f"Could not perform cleanup:\nFile - {e.filename}\nError - {e.strerror}")

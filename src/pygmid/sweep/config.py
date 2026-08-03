@@ -303,7 +303,7 @@ class NgspiceConfig(SweepConfig):
 
     @property
     def netlist_filename(self) -> str:
-        return 'pysweep.cir'
+        return 'pysweep.spice'
 
     @property
     def paramfile(self) -> str:
@@ -370,7 +370,7 @@ class NgspiceConfig(SweepConfig):
         p_probe = ' '.join(f'@mp[{p}]' for p in self._DC_PARAMS)
 
         return '\n'.join((
-            '* pysweep.cir',
+            '* pysweep.spice',
             *self._extra_includes(),
             model_include,
             f'.include {os.path.abspath(self.paramfile)}',
@@ -609,7 +609,7 @@ class SubcircuitNgspiceConfig(NgspiceConfig):
         p_probe = ' '.join(f'@m.xmp.{self._internal_probe_name(modelp)}[{p}]' for p in self._DC_PARAMS)
 
         return '\n'.join((
-            '* pysweep.cir',
+            '* pysweep.spice',
             *self._extra_includes(),
             model_include,
             f'.include {os.path.abspath(self.paramfile)}',

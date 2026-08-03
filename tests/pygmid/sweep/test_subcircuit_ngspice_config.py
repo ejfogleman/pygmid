@@ -97,7 +97,12 @@ def test_instance_tail_formula_matches_verified_proc_char_testbench(sky130_cfg):
     assert f'ad={expected_ad}' in tail
     assert f'pd={expected_pd}' in tail
     assert f'nrd={expected_nrd}' in tail
-    assert 'sa=0 sb=0 sd=0' in tail
+    # sa/sb/sd deliberately omitted -- both PDKs' subckts already default
+    # them to 0, and hardcoding them here would conflict with a caller
+    # overriding them via [MODEL] MN/MP.
+    assert 'sa=' not in tail
+    assert 'sb=' not in tail
+    assert 'sd=' not in tail
 
 
 def test_instance_tail_geom_values_are_unit_suffixed_for_gf180(gf180_cfg):
@@ -111,11 +116,43 @@ def test_instance_tail_geom_values_are_unit_suffixed_for_gf180(gf180_cfg):
     assert f'nrd={expected_nrd}u' not in tail
 
 
+def test_instance_tail_area_values_are_pico_suffixed_for_gf180(gf180_cfg):
+    """ Regression test for a confirmed bug: ad/as are um^2-valued areas,
+    not um-valued lengths, so they need a `p` (pico, 1e-12) suffix, not `u`
+    (micro, 1e-6) -- `u` on ad/as inflated capbd/capbs from ~1fF to
+    ~100-170pF for a W=1um device (off by (1e6)**2, i.e. um^2 vs m^2).
+    """
+    width, nf = 0.97, 1
+    tail = gf180_cfg._instance_tail(width, nf)
+    spacing = 0.18
+    expected_ad = int((nf + 1) / 2) * width / nf * spacing
+    expected_as = int((nf + 2) / 2) * width / nf * spacing
+    assert f'ad={expected_ad}p' in tail
+    assert f'as={expected_as}p' in tail
+    assert f'ad={expected_ad}u' not in tail
+    assert f'as={expected_as}u' not in tail
+
+
 def test_instance_tail_geom_values_are_bare_for_sky130(sky130_cfg):
     width, nf = 0.97, 1
     tail = sky130_cfg._instance_tail(width, nf)
     assert f'W={width} ' in tail
     assert f'W={width}u' not in tail
+
+
+def test_instance_tail_area_values_are_bare_for_sky130(sky130_cfg):
+    """ sky130's ad/as stay bare (unlike gf180's `p` suffix) -- ngspice's
+    `scale` option is dimension-aware for MOSFET instance params and
+    squares the factor itself for area-type ones (AD/AS), so the same bare
+    number that gives correct length under `scale=1.0u` also gives correct
+    area, with no separate area suffix needed.
+    """
+    width, nf = 0.97, 1
+    tail = sky130_cfg._instance_tail(width, nf)
+    spacing = 0.29
+    expected_ad = int((nf + 1) / 2) * width / nf * spacing
+    assert f'ad={expected_ad} ' in tail
+    assert f'ad={expected_ad}p' not in tail
 
 
 @pytest.mark.skipif(

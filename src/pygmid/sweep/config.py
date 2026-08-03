@@ -512,13 +512,30 @@ class SubcircuitNgspiceConfig(NgspiceConfig):
 
     @abstractmethod
     def _geom(self, value: float) -> str:
-        """ Render a um-valued length/area/perimeter number in this PDK's
+        """ Render a um-valued length/perimeter number in this PDK's
         convention: bare (sky130 -- relies on the target model file's own
         `.options parser scale=1.0u`, pulled in transitively via the
         standard `.lib sky130.lib.spice <corner>` include) or `u`-suffixed
-        (gf180 -- no such directive available). Used for W/ad/as/pd/ps;
-        NOT for nrd/nrs, which are dimensionless ratios (spacing/width)
-        and never need a unit suffix either way.
+        (gf180 -- no such directive available). Used for W/pd/ps; NOT for
+        ad/as (see `_area()`) or nrd/nrs, which are dimensionless ratios
+        (spacing/width) and never need a unit suffix either way.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _area(self, value: float) -> str:
+        """ Render a um^2-valued area number (ad/as) in this PDK's
+        convention. Not the same as `_geom()`: a SPICE unit suffix is a
+        flat numeric multiplier applied to whatever number precedes it,
+        regardless of the parameter's physical dimension -- `u` (1e-6) is
+        correct for a um-valued length but wrong for a um^2-valued area,
+        which needs 1e-6 squared = 1e-12 (`p`, pico). sky130: bare, same as
+        `_geom()` -- ngspice's `scale` option is dimension-aware for MOSFET
+        instance params and squares the factor itself for AD/AS, so the
+        same bare number that gives correct length also gives correct area
+        there. gf180 (explicit suffixes, no `scale` option): `p`, not `u` --
+        using `u` here was a confirmed bug (inflated capbd/capbs from ~1fF
+        to ~100-170pF for a W=1um device, i.e. off by (1e6)**2).
         """
         raise NotImplementedError
 
@@ -545,6 +562,13 @@ class SubcircuitNgspiceConfig(NgspiceConfig):
         raise NotImplementedError
 
     def _instance_tail(self, width, nf) -> str:
+        # sa/sb/sd deliberately omitted: both sky130's and gf180mcuD's
+        # subckts already default them to 0 (confirmed directly from the
+        # PDK sources), so hardcoding `sa=0 sb=0 sd=0` here only risked a
+        # duplicate-param conflict with whatever a caller passes via
+        # `[MODEL] MN`/`MP` (SPICE doesn't merge repeated instance params).
+        # Leaving them out lets MN/MP override them like anything else,
+        # falling back to the same 0 default either way.
         spacing = self._diffusion_spacing
         ad = int((nf+1)/2) * width/nf * spacing
         as_ = int((nf+2)/2) * width/nf * spacing
@@ -552,9 +576,9 @@ class SubcircuitNgspiceConfig(NgspiceConfig):
         ps = 2*int((nf+2)/2) * (width/nf + spacing)
         nrd = nrs = spacing / width
         return (f"W={self._geom(width)} nf={nf} "
-                f"ad={self._geom(ad)} as={self._geom(as_)} "
+                f"ad={self._area(ad)} as={self._area(as_)} "
                 f"pd={self._geom(pd)} ps={self._geom(ps)} "
-                f"nrd={nrd} nrs={nrs} sa=0 sb=0 sd=0")
+                f"nrd={nrd} nrs={nrs}")
 
     def _generate_netlist(self) -> str:
         modelfile = os.path.abspath(self._config['MODEL']['FILE'])
@@ -629,6 +653,9 @@ class NgspiceSky130Config(SubcircuitNgspiceConfig):
     def _geom(self, value: float) -> str:
         return f"{value}"
 
+    def _area(self, value: float) -> str:
+        return f"{value}"
+
     @property
     def _length_expr(self) -> str:
         return '{length}'
@@ -655,6 +682,9 @@ class NgspiceGf180Config(SubcircuitNgspiceConfig):
 
     def _geom(self, value: float) -> str:
         return f"{value}u"
+
+    def _area(self, value: float) -> str:
+        return f"{value}p"
 
     @property
     def _length_expr(self) -> str:
